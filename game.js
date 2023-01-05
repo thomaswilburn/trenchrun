@@ -1,4 +1,4 @@
-const MAX_DEPTH = 512;
+const MAX_DEPTH = 1024;
 const XFOV = Math.PI * .3; // 60deg FOV
 const YFOV = XFOV * .75 // vertical FOV
 const XFOV2 = XFOV * .5;
@@ -27,22 +27,25 @@ function loadImage(url) {
   });
 }
 
-async function loadMap(url, size) {
-  var image = await loadImage(url);
+async function loadMap(terrain, color, size) {
+  var [tImage, cImage] = await Promise.all([terrain, color].map(loadImage));
   var canvas = document.createElement("canvas");
-  var w = canvas.width = size || image.naturalWidth;
-  var h = canvas.height = size || image.naturalHeight;
+  var w = canvas.width = size || tImage.naturalWidth;
+  var h = canvas.height = size || tImage.naturalHeight;
   var context = canvas.getContext("2d", { willReadFrequently: true });
-  context.drawImage(image, 0, 0, w, h);
+  context.drawImage(tImage, 0, 0, w, h);
   var { data } = context.getImageData(0, 0, w, h);
   var map = new Uint8Array(w * h);
   for (var i = 0; i < w * h; i++) {
     map[i] = data[i * 4];
   }
-  return { map, width: w, height: h };
+  context.drawImage(cImage, 0, 0, w, h);
+  var { data } = context.getImageData(0, 0, w, h);
+  var colors = new Uint32Array(data.buffer);
+  return { map, colors, width: w, height: h };
 }
 
-var heightmap = await loadMap("heightmap.jpg", TILE_SIZE);
+var heightmap = await loadMap("heightmap.png", "colormap.png", TILE_SIZE);
 
 var camera = {
   x: 128,
@@ -50,7 +53,7 @@ var camera = {
   z: 250,
   dz: 0,
   theta: 0,
-  pitch: -Math.PI * .15
+  pitch: -Math.PI * .05
 };
 
 var canvas = document.querySelector("canvas");
@@ -103,32 +106,37 @@ function render(camera) {
       var decline = ROW_RATIO[r] + camera.pitch;
       var stepZ = Math.sin(decline);
       var rz = camera.z + distance * stepZ;
+      var step = 1;
       cast: while (distance < MAX_DEPTH) {
         // we're adding the width and height here to effectively force the numbers into a positive domain
         // there's a bitwise trick to this too, but I don't fully trust it
-        var x = ((rx + heightmap.width) | 0) % heightmap.width;
-        var y = ((ry + heightmap.height) | 0) % heightmap.height;
-        var ground = heightmap.map[x + y * heightmap.width];
-        if (rz < ground) {
+        var x = (rx % heightmap.width) | 0;
+        if (x < 0) x += heightmap.width;
+        var y = (ry % heightmap.height) | 0;
+        if (y < 0) y += heightmap.height;
+        var mapOffset = x + y * heightmap.width;
+        var ground = heightmap.map[mapOffset];
+        if ((rz | 0) < ground) {
           var pixel = c + r * WIDTH;
           if (distance < depthBuffer[pixel]) {
             var v = 512 - distance >> 1;
-            var red = 0xFF << RED_SHIFT;
-            var green = ground << GREEN_SHIFT;
-            var blue = (255 - ground) << BLUE_SHIFT;
-            // var red = v << RED_SHIFT;
-            // var green = v << GREEN_SHIFT;
-            // var blue = v << BLUE_SHIFT;
+            // var red = 0xFF << RED_SHIFT;
+            // var green = ground << GREEN_SHIFT;
+            // var blue = (255 - ground) << BLUE_SHIFT;
+            var red = v << RED_SHIFT;
+            var green = v << GREEN_SHIFT;
+            var blue = v << BLUE_SHIFT;
             var alpha = 0xFF << ALPHA_SHIFT;
-            var color = red | green | blue | alpha;
+            // var color = red | green | blue | alpha;
+            var color = heightmap.colors[mapOffset];
             renderBuffer[pixel] = color;
             depthBuffer[pixel] = distance;
           }
           break cast;
         }
-        var step = distance > 128 ? 4 :
-          distance > 64 ? 3 :
-          distance > 32 ? 2 :
+        step = 
+          distance > MAX_DEPTH / 2 ? 2 :
+          distance > MAX_DEPTH * .3 ? 1.5 : 
           1;
         distance += step;
         rx += stepX * step;
@@ -148,21 +156,27 @@ function tick(time) {
     last = time - 100;
   }
   var scaler = (time - last) / FRAME_TIME;
-  camera.theta += .005 * scaler;
-  camera.x = (camera.x + 1 * scaler) % heightmap.width;
-  camera.y = (camera.y + 1 * scaler) % heightmap.height;
-  var floor = heightmap.map[camera.x|0 + camera.y|0 * heightmap.width] + 80;
-  if (camera.z < floor) {
-    camera.dz += .02 * scaler;
+  // camera.theta += .005 * scaler;
+  camera.theta = .5 * Math.sin(time * 0.0001) + Math.PI * .6;
+  camera.x = (camera.x + Math.cos(camera.theta) * scaler) % heightmap.width;
+  if (camera.x < 0) camera.x += heightmap.width;
+  camera.y = (camera.y + Math.sin(camera.theta) * scaler) % heightmap.height;
+  if (camera.y < 0) camera.y += heightmap.height;
+  var floor = heightmap.map[(camera.x|0) + (camera.y|0) * heightmap.width];
+  camera.z = Math.max(floor + 20, camera.z, 64);
+  if (camera.z < floor + 80) {
+    camera.dz += .03 * scaler;
+  } if (camera.z < floor + 40) {
+    camera.dz += .06 * scaler;
   } else {
-    camera.dz -= .005 * scaler;
+    camera.dz -= .01 * scaler;
   }
   camera.z += camera.dz * scaler;
   if (camera.dz > .5) {
     camera.dz = .5;
   }
-  if (camera.dz < -.5) {
-    camera.dz = -.5;
+  if (camera.dz < -.2) {
+    camera.dz = -.2;
   }
   last = time;
   requestAnimationFrame(tick);
